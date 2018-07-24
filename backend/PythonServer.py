@@ -192,7 +192,7 @@ def query_metrics(folder):
 		query_results = CSVs[source].filter(items=[target["target"]])
 		if (query_results[target["target"]].dtype==object):
 			query_results[target["target"]] = pd.to_numeric(query_results[target["target"]].str.replace(',','.'), errors='coerce')
-		query_results.index = pd.to_datetime(query_results.index).tz_localize('Europe/Paris', is_dst=False)
+		query_results.index = pd.to_datetime(query_results.index).tz_localize("Etc/Greenwich")
 		query_results = query_results[(query_results.index >= pd.Timestamp(req['range']['from']).to_pydatetime()) & (query_results.index <= pd.Timestamp(req['range']['to']).to_pydatetime())]
 		if target.get('type', 'timeserie') == 'table':
 		    results.extend(dataframe_to_json_table(target, query_results))
