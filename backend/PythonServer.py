@@ -1,4 +1,4 @@
-# !/usr/bin/python
+#!/usr/bin/python3
 
 from flask import Flask, request, jsonify, json, abort
 from flask_cors import CORS, cross_origin
@@ -9,6 +9,7 @@ import os
 import csv
 import sys
 import getopt
+import time
 
 app = Flask(__name__)
 
@@ -20,7 +21,7 @@ metric_finders = {}
 metric_readers = {}
 annotation_readers = {}
 panel_readers = {}
-
+timesFileOpen = 1
 
 #-------------------------------------------------------------------------------
 def add_reader(name, reader):
@@ -86,7 +87,6 @@ def find_metrics(folder):
 # ------------------------------------------------------------------------------
 def dataframe_to_response(target, df):
 	response = []
-	print("dataframe_to_response")
 	if df.empty:
 	    return response
 	if isinstance(df, pd.Series):
@@ -176,6 +176,8 @@ def _series_to_response(df, target):
 @app.route('/<folder>/query', methods=methods)
 @cross_origin(max_age=600)
 def query_metrics(folder):
+	start = time.time()
+	global timesFileOpen
 	req = request.get_json()
 	results = []
 	CSVs = {}
@@ -184,7 +186,9 @@ def query_metrics(folder):
 		if source=="":
 			return jsonify(results)
 		if source not in CSVs:
-			with open(path+str(folder)+"/"+source+".csv",'r') as csvfile:
+			with open(path+str(folder)+"/"+source+".csv", 'r', encoding='utf-8') as csvfile:
+				print("Times opened a file: ", timesFileOpen)
+				timesFileOpen+= 1
 				dialect = csv.Sniffer().sniff(csvfile.read(1024))
 				CSVs[source] = pd.read_csv(path+str(folder)+"/"+source+".csv",index_col=0 , dialect=dialect, encoding='latin1')
 	for target in req['targets']:
@@ -192,12 +196,14 @@ def query_metrics(folder):
 		query_results = CSVs[source].filter(items=[target["target"]])
 		if (query_results[target["target"]].dtype==object):
 			query_results[target["target"]] = pd.to_numeric(query_results[target["target"]].str.replace(',','.'), errors='coerce')
-		query_results.index = pd.to_datetime(query_results.index).tz_localize("Etc/Greenwich")
+		query_results.index = pd.to_datetime(query_results.index).tz_localize('Etc/Greenwich')
 		query_results = query_results[(query_results.index >= pd.Timestamp(req['range']['from']).to_pydatetime()) & (query_results.index <= pd.Timestamp(req['range']['to']).to_pydatetime())]
 		if target.get('type', 'timeserie') == 'table':
 		    results.extend(dataframe_to_json_table(target, query_results))
 		else:
 		    results.extend(dataframe_to_response(target, query_results))
+	end = time.time()
+	print("Query_metrics time: ", end - start)
 	return jsonify(results)
 
 
