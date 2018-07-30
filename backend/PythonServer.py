@@ -2,6 +2,7 @@
 
 from flask import Flask, request, jsonify, json, abort
 from flask_cors import CORS, cross_origin
+from cachetools import cached, TTLCache
 
 import pandas as pd
 import glob
@@ -22,6 +23,8 @@ metric_readers = {}
 annotation_readers = {}
 panel_readers = {}
 timesFileOpen = 1
+cache = TTLCache(maxsize=10, ttl=300)
+
 
 #-------------------------------------------------------------------------------
 def add_reader(name, reader):
@@ -69,9 +72,12 @@ def query_routes(folder):
 @app.route('/<folder>/search', methods=methods)
 @cross_origin()
 def find_metrics(folder):
+	global timesFileOpen
 	req = request.get_json()
 	source = req.get('source', '')
 	with open(path+str(folder)+"/"+source+".csv", 'r') as csvfile:
+		print("Times opened a file: ", timesFileOpen)
+		timesFileOpen+= 1
 		dialect = csv.Sniffer().sniff(csvfile.read(1024))
 		csvfile.seek(0)
 		reader = csv.reader(csvfile, dialect)
@@ -186,11 +192,7 @@ def query_metrics(folder):
 		if source=="":
 			return jsonify(results)
 		if source not in CSVs:
-			with open(path+str(folder)+"/"+source+".csv", 'r', encoding='utf-8') as csvfile:
-				print("Times opened a file: ", timesFileOpen)
-				timesFileOpen+= 1
-				dialect = csv.Sniffer().sniff(csvfile.read(1024))
-				CSVs[source] = pd.read_csv(path+str(folder)+"/"+source+".csv",index_col=0 , dialect=dialect, encoding='latin1')
+			CSVs[source] = get_CSVs(folder, source)
 	for target in req['targets']:
 		source = target['source']
 		query_results = CSVs[source].filter(items=[target["target"]])
@@ -206,22 +208,30 @@ def query_metrics(folder):
 	print("Query_metrics time: ", end - start)
 	return jsonify(results)
 
+#-------------------------------------------------------------------------------
+@cached(cache)
+def get_CSVs(folder, source):
+	with open(path+str(folder)+"/"+source+".csv", 'r') as csvfile:
+		print("...get_CSVs called...")
+		dialect = csv.Sniffer().sniff(csvfile.read(1024))
+		return pd.read_csv(path+str(folder)+"/"+source+".csv",index_col=0 , dialect=dialect, encoding='latin1')
 
 #-------------------------------------------------------------------------------
 @app.route('/<folder>/annotations', methods=methods)
 @cross_origin(max_age=600)
 def query_annotations(folder):
-    print(request.headers, request.get_json())
-    req = request.get_json()
-    results = []
-    ts_range = {'$gt': pd.Timestamp(req['range']['from']).to_pydatetime(),
-                '$lte': pd.Timestamp(req['range']['to']).to_pydatetime()}
-    query = req['annotation']['query']
-    if ':' not in query:
-        abort(404, Exception('Target must be of type: <finder>:<metric_query>, got instead: ' + query))
-    finder, target = query.split(':', 1)
-    results.extend(annotations_to_response(query, annotation_readers[finder](target, ts_range)))
-    return jsonify(results)
+    #print(request.headers, request.get_json())
+	print(request.get_json())
+	req = request.get_json()
+	results = []
+	ts_range = {'$gt': pd.Timestamp(req['range']['from']).to_pydatetime(),
+				'$lte': pd.Timestamp(req['range']['to']).to_pydatetime()}
+	query = req['annotation']['query']
+	if ':' not in query:
+		abort(404, Exception('Target must be of type: <finder>:<metric_query>, got instead: ' + query))
+	finder, target = query.split(':', 1)
+	results.extend(annotations_to_response(query, annotation_readers[finder](target, ts_range)))
+	return jsonify(results)
 
 
 #-------------------------------------------------------------------------------
