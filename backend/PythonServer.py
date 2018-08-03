@@ -1,8 +1,7 @@
-#!/usr/bin/python
-
 from flask import Flask, request, jsonify, json, abort
 from flask_cors import CORS, cross_origin
 from cachetools import cached, TTLCache
+from itertools import combinations
 
 import pandas as pd
 import glob
@@ -11,6 +10,9 @@ import csv
 import sys
 import getopt
 import time
+import pickle
+import psutil
+
 
 app = Flask(__name__)
 
@@ -25,26 +27,21 @@ panel_readers = {}
 timesFileOpen = 1
 cache = TTLCache(maxsize=10, ttl=300)
 
-
 #-------------------------------------------------------------------------------
 def add_reader(name, reader):
 	metric_readers[name] = reader
-
 
 #-------------------------------------------------------------------------------
 def add_finder(name, finder):
 	metric_finders[name] = finder
 
-
 #-------------------------------------------------------------------------------
 def add_annotation_reader(name, reader):
 	annotation_readers[name] = reader
 
-
 #-------------------------------------------------------------------------------
 def add_panel_reader(name, reader):
 	panel_readers[name] = reader
-
 
 # ------------------------------------------------------------------------------
 @app.route('/<folder>/', methods=methods)
@@ -57,7 +54,6 @@ def hello_world(folder):
 	else:
 		abort(404)
 
-
 # ------------------------------------------------------------------------------
 @app.route('/<folder>/sources', methods=methods)
 @cross_origin(max_age=600)
@@ -66,7 +62,6 @@ def query_routes(folder):
 	for file in glob.glob(path+str(folder)+"/*.csv"):
 		results.append(os.path.basename(file)[:-4])
 	return jsonify(results)
-
 
 # ------------------------------------------------------------------------------
 @app.route('/<folder>/search', methods=methods)
@@ -78,7 +73,7 @@ def find_metrics(folder):
 	with open(path+str(folder)+"/"+source+".csv", 'r') as csvfile:
 		print("Times opened a file: ", timesFileOpen)
 		timesFileOpen+= 1
-		dialect = csv.Sniffer().sniff(csvfile.read(1024))
+		dialect = csv.Sniffer().sniff(csvfile.readline())
 		csvfile.seek(0)
 		reader = csv.reader(csvfile, dialect)
 		fieldnames = reader.__next__()
@@ -87,8 +82,9 @@ def find_metrics(folder):
 	for key in fieldnames:
 		if key.find(target) != -1:
 			metrics.append(key)
+	process = psutil.Process(os.getpid())
+	print("Memory usage after find_metrics: ", (process.memory_info().rss)/10**6)
 	return jsonify(metrics)
-
 
 # ------------------------------------------------------------------------------
 def dataframe_to_response(target, df):
@@ -105,7 +101,6 @@ def dataframe_to_response(target, df):
 
 	return response
 
-
 #-------------------------------------------------------------------------------
 def dataframe_to_json_table(target, df):
 	response = []
@@ -118,7 +113,6 @@ def dataframe_to_json_table(target, df):
 	else:
 		abort(404, Exception('Received object is not a dataframe.'))
 	return response
-
 
 #-------------------------------------------------------------------------------
 def annotations_to_response(target, df):
@@ -150,7 +144,6 @@ def annotations_to_response(target, df):
         abort(404, Exception('Received object is not a dataframe or series.'))
     return response
 
-
 #-------------------------------------------------------------------------------
 def _series_to_annotations(df, target):
     if df.empty:
@@ -161,7 +154,6 @@ def _series_to_annotations(df, target):
     values = sorted_df.values.tolist()
     return {'target': '%s' % (df.name),
             'datapoints': list(zip(values, timestamps))}
-
 
 #-------------------------------------------------------------------------------
 def _series_to_response(df, target):
@@ -174,15 +166,16 @@ def _series_to_response(df, target):
 	except:
 		timestamps = (sorted_df.index.astype(pd.np.int64) // 10 ** 6).tolist()
 	values = sorted_df.values.tolist()
+	process = psutil.Process(os.getpid())
+	print("Memory usage after series_to_response: ", (process.memory_info().rss)/10**6)
 	return {'target': '%s' % (df.name),
             'datapoints': list(zip(values, timestamps))}
-
 
 #-------------------------------------------------------------------------------
 @app.route('/<folder>/query', methods=methods)
 @cross_origin(max_age=600)
 def query_metrics(folder):
-	start = time.time()
+	startGetCSVs = time.time()
 	global timesFileOpen
 	req = request.get_json()
 	results = []
@@ -193,34 +186,58 @@ def query_metrics(folder):
 			return jsonify(results)
 		if source not in CSVs:
 			CSVs[source] = get_CSVs(folder, source)
+	endGetCSVs = time.time()
+	print("Get CSVs time: ", endGetCSVs - startGetCSVs)
+	startStrip = time.time()
 	for target in req['targets']:
 		source = target['source']
 		query_results = CSVs[source].filter(items=[target["target"]])
 		if (query_results[target["target"]].dtype==object):
 			query_results[target["target"]] = pd.to_numeric(query_results[target["target"]].str.replace(',','.'), errors='coerce')
-		query_results.index = pd.to_datetime(query_results.index, format='%m/%d/%y %H:%M').tz_localize('Etc/Greenwich')
 		query_results = query_results[(query_results.index >= pd.Timestamp(req['range']['from']).to_pydatetime()) & (query_results.index <= pd.Timestamp(req['range']['to']).to_pydatetime())]
 		if target.get('type', 'timeserie') == 'table':
 		    results.extend(dataframe_to_json_table(target, query_results))
 		else:
 		    results.extend(dataframe_to_response(target, query_results))
-	end = time.time()
-	print("Query_metrics time: ", end - start)
+	endStrip = time.time()
+	print("Query_metrics time: ", endStrip - startStrip)
+	process = psutil.Process(os.getpid())
+	print("Memory usage after query_metrics: ", (process.memory_info().rss)/10**6)
 	return jsonify(results)
 
 #-------------------------------------------------------------------------------
-@cached(cache)
 def get_CSVs(folder, source):
 	with open(path+str(folder)+"/"+source+".csv", 'r') as csvfile:
-		print("...get_CSVs called...")
-		dialect = csv.Sniffer().sniff(csvfile.read(1024))
-		return pd.read_csv(path+str(folder)+"/"+source+".csv",index_col=0 , dialect=dialect, encoding='latin1')
+		try:
+			with open(path+"config.pkl", "r+b") as f:
+				parsedFiles = pickle.load(f)
+		except IOError:
+			parsedFiles = {"fileName":"boolean"}
+			with open(path+"config.pkl", "wb") as f:
+				pickle.dump(parsedFiles, f)
+		dialect = csv.Sniffer().sniff(csvfile.readline())
+		csvData = pd.read_csv(path+str(folder)+"/"+source+".csv",index_col=0 , dialect=dialect, encoding='latin1')	
+		if source in parsedFiles and parsedFiles[source] == "True":
+			print("Skip datetime parsing...")
+			csvData.index = pd.to_datetime(csvData.index, format=r"%Y-%m-%d %H:%M:%S").tz_localize("Universal")
+			process = psutil.Process(os.getpid())
+			print("Memory usage after get_CSVs without parsing: ", (process.memory_info().rss)/10**6)
+			return csvData
+		else:
+			print("Parsing datetimes...")
+			csvData.index = pd.to_datetime(csvData.index).tz_localize('Universal')
+			csvData.to_csv(path+str(folder)+"/"+source+".csv")
+			parsedFiles[source] = "True"
+			with open(path+"config.pkl", "wb") as f:
+				pickle.dump(parsedFiles, f)
+			process = psutil.Process(os.getpid())
+			print("Memory usage after get_CSVs with parsing: ", (process.memory_info().rss)/10**6)
+			return csvData
 
 #-------------------------------------------------------------------------------
 @app.route('/<folder>/annotations', methods=methods)
 @cross_origin(max_age=600)
 def query_annotations(folder):
-    #print(request.headers, request.get_json())
 	print(request.get_json())
 	req = request.get_json()
 	results = []
@@ -232,7 +249,6 @@ def query_annotations(folder):
 	finder, target = query.split(':', 1)
 	results.extend(annotations_to_response(query, annotation_readers[finder](target, ts_range)))
 	return jsonify(results)
-
 
 #-------------------------------------------------------------------------------
 @app.route('/<folder>/panels', methods=methods)
@@ -248,12 +264,11 @@ def get_panel(folder):
 	finder, target = query.split(':', 1)
 	return panel_readers[finder](target, ts_range)
 
-
 #-------------------------------------------------------------------------------
 def main(argv):
 	global path
 	port = 3003
-	debug = False
+	debug = True
 	addr = '0.0.0.0'
 	try:
 	  opts, args = getopt.getopt(argv,"hvp:f:a:",["port=","folder=","addr="])
